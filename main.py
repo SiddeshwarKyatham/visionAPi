@@ -15,70 +15,66 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configuration
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 API_KEY = os.environ.get("GOOGLE_VISION_API_KEY")
 
 @app.get("/")
 async def root():
-    return {"status": "online", "message": "AI Food Nutrition API is running"}
+    return {"status": "online", "message": "Vision API is active"}
 
 @app.post("/upload-image")
 async def upload_image(file: UploadFile = File(...)):
     if not API_KEY:
-        raise HTTPException(status_code=500, detail="Google Vision API Key not configured on server")
+        raise HTTPException(status_code=500, detail="API Key missing on Render")
 
-    # 1. Save file locally (optional, but good for debugging)
     safe_name = os.path.basename(file.filename)
     file_path = os.path.join(UPLOAD_DIR, safe_name)
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    # 2. Read file and encode to Base64 for Google Vision
     with open(file_path, "rb") as image_file:
         content = base64.b64encode(image_file.read()).decode("utf-8")
 
-    # 3. Call Google Vision API
     vision_url = f"https://vision.googleapis.com/v1/images:annotate?key={API_KEY}"
     payload = {
-        "requests": [
-            {
-                "image": {"content": content},
-                "features": [
-                    {"type": "LABEL_DETECTION", "maxResults": 10},
-                    {"type": "OBJECT_LOCALIZATION"}
-                ]
-            }
-        ]
+        "requests": [{
+            "image": {"content": content},
+            "features": [
+                {"type": "LABEL_DETECTION", "maxResults": 15},
+                {"type": "OBJECT_LOCALIZATION", "maxResults": 10},
+                {"type": "TEXT_DETECTION", "maxResults": 5}
+            ]
+        }]
     }
 
     async with httpx.AsyncClient() as client:
         response = await client.post(vision_url, json=payload, timeout=30.0)
-        
+    
     if response.status_code != 200:
-        raise HTTPException(status_code=response.status_code, detail="Error from Google Vision API")
+        return {"status": "error", "message": f"Google Error: {response.status_code}"}
 
     result = response.json()
+    res = result.get("responses", [{}])[0]
     
-    # 4. Extract labels from Google's response
-    # The structure is: result['responses'][0]['labelAnnotations']
-    responses = result.get("responses", [])
-    if not responses:
-        return {"status": "success", "labels": [], "message": "No data found"}
+    # Collect all findings
+    findings = []
     
-    labels = responses[0].get("labelAnnotations", [])
+    # 1. Labels
+    for label in res.get("labelAnnotations", []):
+        findings.append({"name": label.get("description"), "score": label.get("score"), "type": "label"})
     
-    # Format labels for our Flutter app
-    formatted_labels = [
-        {"description": label.get("description"), "score": label.get("score")}
-        for label in labels
-    ]
+    # 2. Objects (often more specific)
+    for obj in res.get("localizedObjectAnnotations", []):
+        findings.append({"name": obj.get("name"), "score": obj.get("score"), "type": "object"})
+
+    # Sort by confidence score
+    findings.sort(key=lambda x: x['score'] or 0, reverse=True)
 
     return {
         "status": "success",
-        "labels": formatted_labels,
-        "message": "Real analysis complete"
+        "labels": findings, # Flutter app expects 'labels'
+        "raw_text": res.get("fullTextAnnotation", {}).get("text", "")
     }
 
 if __name__ == "__main__":
